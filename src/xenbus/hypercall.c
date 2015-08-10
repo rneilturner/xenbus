@@ -193,6 +193,109 @@ V4vFilterErrno(int err)
     return status;
 }
 
+static PVOID
+GetHypercallPage(VOID)
+{
+    ULONG eax, ebx ='fool', ecx = 'beef', edx = 'dead',
+        nr_hypercall_pages;
+    PVOID res;
+    unsigned i;
+
+    if (!CheckXenHypervisor()) {
+        TraceError (("cpuid says this isn't really Xen.\n"));
+        return NULL;
+    }
+
+    XenCpuid(1, &eax, &ebx, &ecx, &edx);
+    TraceVerbose (("Xen version %d.%d.\n", eax >> 16, eax & 0xffff));
+
+    //
+    // Get the number of hypercall pages and the MSR to use to tell the
+    // hypervisor which guest physical pages were assigned.
+    //
+
+    XenCpuid(2, &nr_hypercall_pages, &ebx, &ecx, &edx);
+
+    res = XmAllocateMemory(PAGE_SIZE * nr_hypercall_pages);
+
+    if (res == NULL) {
+        TraceError (("Cannot allocate %d pages for hypercall trampolines.\n", nr_hypercall_pages));
+        return NULL;
+    }
+
+    //
+    // For each page, get the guest physical address and pass it to
+    // the hypervisor.
+    //
+    // Note: The low 12 bits of the address is used to pass the index
+    // of the page within the hypercall area.
+    //
+
+    for (i = 0; i < nr_hypercall_pages; i++)
+    {
+        PHYSICAL_ADDRESS gpa;
+
+        gpa = MmGetPhysicalAddress(((PCHAR)res) + (i << PAGE_SHIFT));
+        _wrmsr(ebx, gpa.LowPart | i, gpa.HighPart);
+    }
+
+    return res;
+}
+
+#pragma warning(push)
+#pragma warning(disable: 4731)
+
+// TODO: Implement 64 bit version.
+
+//push rdi
+//push rsi
+//mov rdi, rdx
+//mov rax, qword ptr [hypercall_page]
+//shl rcx, 5
+//add rax, rcx
+//mov rsi, r8
+//mov rdx, r9
+//mov r10, [rsp+arg_4]
+//mov r8, [rsp+arg_5]
+//mov r9, [rsp+arg_6]
+//call rax
+//pop rsi
+//pop rdi
+//ret
+
+__declspec(inline) ULONG_PTR
+__hypercall6(
+    unsigned long ordinal,
+    ULONG_PTR arg1,
+    ULONG_PTR arg2,
+    ULONG_PTR arg3,
+    ULONG_PTR arg4,
+    ULONG_PTR arg5,
+    ULONG_PTR arg6)
+{
+    ULONG_PTR retval;
+    ULONG_PTR addr = (ULONG_PTR)&hypercall_page[ordinal];
+
+    _asm
+    {
+        mov edi, arg5;
+        mov esi, arg4;
+        mov edx, arg3;
+        mov ecx, arg2;
+        mov ebx, arg1;
+        mov eax, addr;
+        /* Handle ebp carefully */
+        push ebp;
+        push arg6;
+        pop ebp;
+        call eax;
+        pop ebp;
+        mov retval, eax;
+    }
+    return retval;
+}
+#pragma warning(pop)
+
 #define __HYPERVISOR_v4v_op               39
 
 extern ULONG_PTR __hypercall6(unsigned long ordinal,
